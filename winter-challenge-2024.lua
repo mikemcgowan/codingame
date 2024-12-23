@@ -14,11 +14,6 @@ local TENTACLE = "TENTACLE"
 local HARVESTER = "HARVESTER"
 local SPORER = "SPORER"
 
-local heads = {}
-local head
-local next_head_pos = { x = -1, y = -1 }
-local harvesters = {} -- list of points
-
 local function debug(s)
   s = s and s or ""
   io.stderr:write(s .. "\n")
@@ -29,6 +24,10 @@ local grid = {
     local dx = a.x - b.x
     local dy = a.y - b.y
     return dx, dy
+  end,
+
+  adjacent = function(self, dx, dy)
+    return math.abs(dx) == 1 and math.abs(dy) == 0 or math.abs(dx) == 0 and math.abs(dy) == 1
   end,
 
   distance_between = function(self, a, b)
@@ -69,24 +68,39 @@ local function is_protein(typ)
   return #typ == 1 -- A, B, C, D
 end
 
-local function proteins(all_things)
-  local ps = {}
+local function is_organ(typ)
+  return typ == ROOT or typ == BASIC or typ == TENTACLE or typ == HARVESTER or typ == SPORER
+end
+
+local function organs(all_things, owner)
+  owner = owner and owner or OWNER_ME
+  local ts = {}
   for _, v in ipairs(all_things) do
-    if is_protein(v.typ) then
-      table.insert(ps, v)
+    if v.owner == owner and is_organ(v.typ) then
+      table.insert(ts, v)
     end
   end
-  return ps
+  return ts
+end
+
+local function proteins(all_things)
+  local ts = {}
+  for _, v in ipairs(all_things) do
+    if is_protein(v.typ) then
+      table.insert(ts, v)
+    end
+  end
+  return ts
 end
 
 local function enemies(all_things)
-  local es = {}
+  local ts = {}
   for _, v in ipairs(all_things) do
     if v.owner == OWNER_ENEMY then
-      table.insert(es, v)
+      table.insert(ts, v)
     end
   end
-  return es
+  return ts
 end
 
 local function can_grow_basic(my_protein_stack)
@@ -101,35 +115,47 @@ local function can_grow_tentacle(my_protein_stack)
   return my_protein_stack.B > 0 and my_protein_stack.C > 0
 end
 
-local function closest_thing(organ, things)
-  local ts = things
+local function closest_thing(thing, things)
   local distance
-  local thing
-  for _, t in ipairs(ts) do
-    local d = grid:distance_between(t, organ)
+  local closest
+  for _, t in ipairs(things) do
+    local d = grid:distance_between(t, thing)
     if not distance or d < distance then
       distance = d
-      thing = t
+      closest = t
     end
   end
-  return distance, thing
+  return distance, closest
 end
 
-local function closest_protein(organ, all_things)
-  return closest_thing(organ, proteins(all_things))
+local function closest_pair(xs, ys)
+  local distance
+  local closest
+  for _, x in ipairs(xs) do
+    for _, y in ipairs(ys) do
+      local d = grid:distance_between(x, y)
+      if not distance or d < distance then
+        distance = d
+        closest = { from = x, to = y }
+      end
+    end
+  end
+  return distance, closest
 end
 
-local function closest_enemy(organ, all_things)
-  return closest_thing(organ, enemies(all_things))
+local function closest_protein(cells, all_things)
+  return closest_pair(cells, proteins(all_things))
 end
 
-local function get_harvester_direction(all_things, next_head_x, next_head_y)
+local function closest_enemy(cells, all_things)
+  return closest_pair(cells, enemies(all_things))
+end
+
+local function get_harvester_direction(all_things, next_x, next_y)
   for _, v in ipairs(all_things) do
     if is_protein(v.typ) then
-      local dx, dy = grid:deltas(v, { x = next_head_x, y = next_head_y })
-      if math.abs(dx) == 1 and math.abs(dy) == 0 or math.abs(dx) == 0 and math.abs(dy) == 1 then
-        debug("head at " .. next_head_x .. "," .. next_head_y)
-        debug("found protein at " .. next_head_x + dx .. "," .. next_head_y + dy)
+      local dx, dy = grid:deltas(v, { x = next_x, y = next_y })
+      if grid:adjacent(dx, dy) then
         local dir = grid:dir_from_deltas(dx, dy)
         if dir then
           return dir
@@ -142,42 +168,27 @@ end
 local function parse()
   local entityCount = tonumber(io.read())
   local all_things = {}
-
   for _ = 1, entityCount do
     next_token = string.gmatch(io.read(), "%S+")
     local x = tonumber(next_token())
     local y = tonumber(next_token())
     local typ = next_token() -- WALL, ROOT, BASIC, TENTACLE, HARVESTER, SPORER, A, B, C, D
     local owner = tonumber(next_token()) -- 1 if your organ, 0 if enemy organ, -1 if neither
-    local organId = tonumber(next_token()) -- id of this entity if it's an organ, 0 otherwise
-    local organDir = next_token() -- N,E,S,W or X if not an organ
-    local organParentId = tonumber(next_token())
-    local organRootId = tonumber(next_token())
-
+    local organ_id = tonumber(next_token()) -- id of this entity if it's an organ, 0 otherwise
+    local organ_dir = next_token() -- N, E, S, W or X if not an organ
+    local organ_parent_id = tonumber(next_token())
+    local organ_root_id = tonumber(next_token())
     table.insert(all_things, {
-      id = organId,
+      id = organ_id,
       x = x,
       y = y,
       typ = typ,
       owner = owner,
-      organ_dir = organDir,
-      organ_parent_id = organParentId,
-      organ_root_id = organRootId,
+      organ_dir = organ_dir,
+      organ_parent_id = organ_parent_id,
+      organ_root_id = organ_root_id,
     })
-    local u = all_things[#all_things]
-
-    if #heads == 0 and typ == ROOT then
-      heads = { u }
-    elseif x == next_head_pos.x and y == next_head_pos.y then
-      if u.id ~= 0 and u.owner == OWNER_ME then
-        heads[#heads + 1] = u
-      end
-    end
   end
-
-  head = heads[#heads]
-  debug("there are " .. #heads .. " head(s)")
-  debug("set head to id " .. head.id)
   return all_things
 end
 
@@ -195,11 +206,13 @@ local function protein_stacks()
   return { A = myA, B = myB, C = myC, D = myD }, { A = enA, B = enB, C = enC, D = enD }
 end
 
-local function is_being_harvested(protein)
-  for _, h in ipairs(harvesters) do
-    local x, y = grid:move_point_in_dir(h, h.dir)
-    if protein.x == x and protein.y == y then
-      return true
+local function is_being_harvested(all_things, protein)
+  for _, t in ipairs(all_things) do
+    if t.typ == HARVESTER and t.owner == OWNER_ME then
+      local x, y = grid:move_point_in_dir(t, t.organ_dir)
+      if protein.x == x and protein.y == y then
+        return true
+      end
     end
   end
   return false
@@ -213,22 +226,22 @@ local function get_thing_at(all_things, x, y)
   end
 end
 
-local function empty_cells_adjacent_to(all_things, x1, y1)
+local function empty_cells_adjacent_to(all_things, thing)
   local cells = {}
   for _, dir in ipairs(DIRS) do
-    local x2, y2 = grid:move_point_in_dir({ x = x1, y = y1 }, dir)
+    local x2, y2 = grid:move_point_in_dir({ x = thing.x, y = thing.y }, dir)
     local t = get_thing_at(all_things, x2, y2)
     if not t then
-      table.insert(cells, { x = x2, y = y2 })
+      table.insert(cells, { thing = thing, x = x2, y = y2 })
     end
   end
   return cells
 end
 
-local function grow_from_head(x, y, typ, extra)
+local function grow_from(id, x, y, typ, extra)
   local t = {
     "GROW",
-    head.id,
+    id,
     x,
     y,
     typ,
@@ -237,8 +250,6 @@ local function grow_from_head(x, y, typ, extra)
     t[#t + 1] = extra
   end
   print(table.concat(t, " "))
-  next_head_pos = { x = x, y = y }
-  debug("grow_from_head(): " .. x .. "," .. y)
 end
 
 local function spread_adjacent(thing, all_things)
@@ -246,7 +257,7 @@ local function spread_adjacent(thing, all_things)
     local x, y = grid:move_point_in_dir(thing, dir)
     if not get_thing_at(all_things, x, y) then
       debug("spread_adjacent(): there's nothing at " .. x .. "," .. y .. " so growing from there")
-      grow_from_head(x, y, BASIC)
+      grow_from(thing.id, x, y, BASIC)
       return true
     end
   end
@@ -254,10 +265,9 @@ local function spread_adjacent(thing, all_things)
 end
 
 local function spread_anywhere(all_things)
-  for _, o in ipairs(all_things) do
-    if o.owner == OWNER_ME then
-      local b = spread_adjacent(o, all_things)
-      if b then
+  for _, t in ipairs(all_things) do
+    if t.owner == OWNER_ME then
+      if spread_adjacent(t, all_things) then
         return true
       end
     end
@@ -265,59 +275,41 @@ local function spread_anywhere(all_things)
   return false
 end
 
-local function get_next_head_pos(thing, all_things)
+local function empty_growable_cells(all_things)
   local empty_cells = {}
   for _, t in ipairs(all_things) do
     if t.owner == OWNER_ME then
-      local cells = empty_cells_adjacent_to(all_things, t.x, t.y)
-      for _, v in ipairs(cells) do
+      for _, v in ipairs(empty_cells_adjacent_to(all_things, t)) do
         table.insert(empty_cells, v)
       end
     end
   end
-  if #empty_cells == 0 then
-    return
-  end
-  table.sort(empty_cells, function(c1, c2)
-    local d1 = grid:distance_between(c1, thing)
-    local d2 = grid:distance_between(c2, thing)
-    return d1 < d2
-  end)
-  return empty_cells[1].x, empty_cells[1].y
+  return empty_cells
 end
 
 local function grow_towards_closest_protein(my_protein_stack, all_things)
-  local d, p = closest_protein(head, all_things)
-  if d and p and not is_being_harvested(p) then
-    debug("distance to closest protein from head is " .. d)
-    debug("closest protein is at " .. p.x .. "," .. p.y)
-    local next_head_x, next_head_y = get_next_head_pos(p, all_things)
-    if next_head_x ~= head.x or next_head_y ~= head.y then
-      local harvester_d = get_harvester_direction(all_things, next_head_x, next_head_y)
-      if harvester_d and can_grow_harvester(my_protein_stack) then
-        grow_from_head(next_head_x, next_head_y, HARVESTER, harvester_d)
-        table.insert(harvesters, { x = next_head_x, y = next_head_y, dir = harvester_d })
-        return true
-      elseif can_grow_basic(my_protein_stack) then
-        grow_from_head(next_head_x, next_head_y, BASIC)
-        return true
-      end
+  local distance, pair = closest_protein(empty_growable_cells(all_things), all_things)
+  if distance and pair and not is_being_harvested(all_things, pair.to) then
+    debug("closest protein is at " .. pair.to.x .. "," .. pair.to.y)
+    local dir = get_harvester_direction(all_things, pair.to.x, pair.to.y)
+    if dir and can_grow_harvester(my_protein_stack) then
+      grow_from(pair.from.thing.id, pair.to.x, pair.to.y, HARVESTER, dir)
+      return true
+    elseif can_grow_basic(my_protein_stack) then
+      grow_from(pair.from.thing.id, pair.to.x, pair.to.y, BASIC)
+      return true
     end
   end
   return false
 end
 
 local function grow_towards_closest_enemy(my_protein_stack, all_things)
-  local d, e = closest_enemy(head, all_things)
-  if d and e then
-    debug("distance to closest enemy from head is " .. d)
-    debug("closest enemy is at " .. e.x .. "," .. e.y)
-    local next_head_x, next_head_y = get_next_head_pos(e, all_things)
-    if next_head_x ~= head.x or next_head_y ~= head.y then
-      if can_grow_basic(my_protein_stack) then
-        grow_from_head(next_head_x, next_head_y, BASIC)
-        return true
-      end
+  local distance, pair = closest_enemy(empty_growable_cells(all_things), all_things)
+  if distance and pair then
+    debug("closest enemy is at " .. pair.to.x .. "," .. pair.to.y)
+    if can_grow_basic(my_protein_stack) then
+      grow_from(pair.from.thing.id, pair.to.x, pair.to.y, BASIC)
+      return true
     end
   end
   return false
@@ -343,7 +335,7 @@ while true do
 
   -- spread anywhere
   if not instr_sent and can_grow_basic(my_protein_stack) then
-    debug("calling spread anywhere")
+    debug("calling spread_anywhere")
     instr_sent = spread_anywhere(all_things)
   end
 
