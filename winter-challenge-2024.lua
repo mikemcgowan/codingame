@@ -6,6 +6,7 @@ local OWNER_ME = 1
 local OWNER_ENEMY = 0
 local OWNER_NA = -1
 local DIRS = { "N", "E", "S", "W" }
+local MIN_SPORER_UNOBSTRUCTED = W > H and W // 2 or H // 2
 
 local WALL = "WALL"
 local ROOT = "ROOT"
@@ -26,8 +27,8 @@ local grid = {
     return dx, dy
   end,
 
-  adjacent = function(self, dx, dy)
-    return math.abs(dx) == 1 and math.abs(dy) == 0 or math.abs(dx) == 0 and math.abs(dy) == 1
+  two_away = function(self, dx, dy)
+    return math.abs(dx) + math.abs(dy) == 2
   end,
 
   distance_between = function(self, a, b)
@@ -72,11 +73,21 @@ local function is_organ(typ)
   return typ == ROOT or typ == BASIC or typ == TENTACLE or typ == HARVESTER or typ == SPORER
 end
 
-local function organs(all_things, owner)
+local function organ_root_ids(all_things)
+  local root_ids = {}
+  for _, t in ipairs(all_things) do
+    if t.owner == OWNER_ME and t.typ == ROOT then
+      table.insert(root_ids, t.id)
+    end
+  end
+  return root_ids
+end
+
+local function organs(all_things, root_id, owner)
   owner = owner and owner or OWNER_ME
   local ts = {}
   for _, v in ipairs(all_things) do
-    if v.owner == owner and is_organ(v.typ) then
+    if v.owner == owner and is_organ(v.typ) and v.organ_root_id == root_id then
       table.insert(ts, v)
     end
   end
@@ -113,6 +124,14 @@ end
 
 local function can_grow_tentacle(my_protein_stack)
   return my_protein_stack.B > 0 and my_protein_stack.C > 0
+end
+
+local function can_grow_sporer(my_protein_stack)
+  return my_protein_stack.B > 0 and my_protein_stack.D > 0
+end
+
+local function can_grow_root(my_protein_stack)
+  return my_protein_stack.A > 0 and my_protein_stack.B > 0 and my_protein_stack.C > 0 and my_protein_stack.D > 0
 end
 
 local function closest_thing(thing, things)
@@ -155,7 +174,7 @@ local function get_harvester_direction(all_things, next_x, next_y)
   for _, v in ipairs(all_things) do
     if is_protein(v.typ) then
       local dx, dy = grid:deltas(v, { x = next_x, y = next_y })
-      if grid:adjacent(dx, dy) then
+      if grid:two_away(dx, dy) then
         local dir = grid:dir_from_deltas(dx, dy)
         if dir then
           return dir
@@ -256,7 +275,6 @@ local function spread_adjacent(thing, all_things)
   for _, dir in ipairs(DIRS) do
     local x, y = grid:move_point_in_dir(thing, dir)
     if not get_thing_at(all_things, x, y) then
-      debug("spread_adjacent(): there's nothing at " .. x .. "," .. y .. " so growing from there")
       grow_from(thing.id, x, y, BASIC)
       return true
     end
@@ -264,9 +282,41 @@ local function spread_adjacent(thing, all_things)
   return false
 end
 
-local function spread_anywhere(all_things)
+local function count_unobstructed(all_things, cell, dir)
+  local c = 0
+  local p = { x = cell.x, y = cell.y }
+  repeat
+    local x, y = grid:move_point_in_dir(p, dir)
+    local obstruction = get_thing_at(all_things, x, y)
+    if not obstruction then
+      p.x, p.y = x, y
+      c = c + 1
+    end
+  until obstruction
+  return c
+end
+
+local function furthest_unobstructed(all_things, t)
+  if t.organ_dir == "X" then
+    return
+  end
+  local dir = t.organ_dir
+  local p = { x = t.x, y = t.y }
+  repeat
+    local x, y = grid:move_point_in_dir(p, dir)
+    local obstruction = get_thing_at(all_things, x, y)
+    if not obstruction then
+      p.x, p.y = x, y
+    end
+  until obstruction
+  if p.x ~= t.x or p.y ~= t.y then
+    return p
+  end
+end
+
+local function spread_anywhere(all_things, root_id)
   for _, t in ipairs(all_things) do
-    if t.owner == OWNER_ME then
+    if t.owner == OWNER_ME and t.organ_root_id == root_id then
       if spread_adjacent(t, all_things) then
         return true
       end
@@ -275,10 +325,11 @@ local function spread_anywhere(all_things)
   return false
 end
 
-local function empty_growable_cells(all_things)
+local function empty_growable_cells(all_things, root_id)
   local empty_cells = {}
   for _, t in ipairs(all_things) do
-    if t.owner == OWNER_ME then
+    if t.owner == OWNER_ME and t.organ_root_id == root_id then
+      debug("organ id " .. t.id .. " has root id " .. t.organ_root_id)
       for _, v in ipairs(empty_cells_adjacent_to(all_things, t)) do
         table.insert(empty_cells, v)
       end
@@ -287,11 +338,11 @@ local function empty_growable_cells(all_things)
   return empty_cells
 end
 
-local function grow_towards_closest_protein(my_protein_stack, all_things)
-  local distance, pair = closest_protein(empty_growable_cells(all_things), all_things)
+local function grow_towards_closest_protein(my_protein_stack, all_things, root_id)
+  local distance, pair = closest_protein(empty_growable_cells(all_things, root_id), all_things)
   if distance and pair and not is_being_harvested(all_things, pair.to) then
-    debug("closest protein is at " .. pair.to.x .. "," .. pair.to.y)
-    local dir = get_harvester_direction(all_things, pair.to.x, pair.to.y)
+    debug("closest protein from id " .. pair.from.thing.id .. ", type " .. pair.from.thing.typ .. " is at " .. pair.to.x .. "," .. pair.to.y)
+    local dir = get_harvester_direction(all_things, pair.from.thing.x, pair.from.thing.y)
     if dir and can_grow_harvester(my_protein_stack) then
       grow_from(pair.from.thing.id, pair.to.x, pair.to.y, HARVESTER, dir)
       return true
@@ -303,8 +354,8 @@ local function grow_towards_closest_protein(my_protein_stack, all_things)
   return false
 end
 
-local function grow_towards_closest_enemy(my_protein_stack, all_things)
-  local distance, pair = closest_enemy(empty_growable_cells(all_things), all_things)
+local function grow_towards_closest_enemy(my_protein_stack, all_things, root_id)
+  local distance, pair = closest_enemy(empty_growable_cells(all_things, root_id), all_things)
   if distance and pair then
     debug("closest enemy is at " .. pair.to.x .. "," .. pair.to.y)
     if can_grow_basic(my_protein_stack) then
@@ -315,31 +366,98 @@ local function grow_towards_closest_enemy(my_protein_stack, all_things)
   return false
 end
 
+local function grow_sporer(all_things, root_id)
+  local ts = organs(all_things, root_id)
+  for _, t in ipairs(ts) do
+    if t.owner == OWNER_ME and t.typ == SPORER then
+      return false
+    end
+  end
+  local id, p, dir
+  local max = MIN_SPORER_UNOBSTRUCTED - 1
+  for _, t in ipairs(ts) do
+    -- from each of the (up to) 4 adjacent empty cells, where could a sporer fire in a minimally long line?
+    for _, empty_cell in ipairs(empty_cells_adjacent_to(all_things, t)) do
+      for _, direction in ipairs(DIRS) do
+        local l = count_unobstructed(all_things, empty_cell, direction)
+        if l > max then
+          id = t.id
+          p = empty_cell
+          dir = direction
+          max = l
+        end
+      end
+    end
+  end
+  if id and p and dir then
+    grow_from(id, p.x, p.y, SPORER, dir)
+    return true
+  end
+  return false
+end
+
+local function fire_spore(all_things, root_id)
+  local ts = organs(all_things, root_id)
+  for _, t in ipairs(ts) do
+    if t.owner == OWNER_ME and t.typ == SPORER then
+      local p = furthest_unobstructed(all_things, t)
+      if p then
+        local u = {
+          "SPORE",
+          t.id,
+          p.x,
+          p.y,
+        }
+        print(table.concat(u, " "))
+        return true
+      end
+    end
+  end
+  return false
+end
+
 while true do
-  local instr_sent = false
   local all_things = parse()
   local my_protein_stack, enemy_protein_stack = protein_stacks()
-  local requiredActionsCount = tonumber(io.read())
+  local required_instr_count = tonumber(io.read())
+  local root_ids = organ_root_ids(all_things)
+  assert(required_instr_count == #root_ids)
 
-  -- grow towards closest protein, maybe planting a harvester
-  if not instr_sent and (can_grow_basic(my_protein_stack) or can_grow_harvester(my_protein_stack)) then
-    debug("calling grow_towards_closest_protein")
-    instr_sent = grow_towards_closest_protein(my_protein_stack, all_things)
-  end
+  for _, root_id in ipairs(root_ids) do
+    local instr_sent = false
 
-  -- grow towards closest enemy, maybe planting a tentacle
-  if not instr_sent and (can_grow_basic(my_protein_stack) or can_grow_tentacle(my_protein_stack)) then
-    debug("calling grow_towards_closest_enemy")
-    instr_sent = grow_towards_closest_enemy(my_protein_stack, all_things)
-  end
+    -- create a sporer
+    if not instr_sent and can_grow_sporer(my_protein_stack) then
+      debug("calling grow_sporer")
+      instr_sent = grow_sporer(all_things, root_id)
+    end
 
-  -- spread anywhere
-  if not instr_sent and can_grow_basic(my_protein_stack) then
-    debug("calling spread_anywhere")
-    instr_sent = spread_anywhere(all_things)
-  end
+    -- fire a spore
+    if not instr_sent and can_grow_root(my_protein_stack) then
+      debug("calling fire_spore")
+      instr_sent = fire_spore(all_things, root_id)
+    end
 
-  if not instr_sent then
-    print("WAIT")
+    -- grow towards closest protein, maybe planting a harvester
+    if not instr_sent and (can_grow_basic(my_protein_stack) or can_grow_harvester(my_protein_stack)) then
+      debug("calling grow_towards_closest_protein")
+      instr_sent = grow_towards_closest_protein(my_protein_stack, all_things, root_id)
+    end
+
+    -- grow towards closest enemy, maybe planting a tentacle
+    if not instr_sent and (can_grow_basic(my_protein_stack) or can_grow_tentacle(my_protein_stack)) then
+      debug("calling grow_towards_closest_enemy")
+      instr_sent = grow_towards_closest_enemy(my_protein_stack, all_things, root_id)
+    end
+
+    -- spread anywhere
+    if not instr_sent and can_grow_basic(my_protein_stack) then
+      debug("calling spread_anywhere")
+      instr_sent = spread_anywhere(all_things, root_id)
+    end
+
+    if not instr_sent then
+      print("WAIT")
+    end
   end
 end
