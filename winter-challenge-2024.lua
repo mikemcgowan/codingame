@@ -24,53 +24,69 @@ local function debug(s)
   io.stderr:write(s .. "\n")
 end
 
-local function deltas(a, b)
-  local dx = a.x - b.x
-  local dy = a.y - b.y
-  return dx, dy
+local grid = {
+  deltas = function(self, a, b)
+    local dx = a.x - b.x
+    local dy = a.y - b.y
+    return dx, dy
+  end,
+
+  distance_between = function(self, a, b)
+    local dx, dy = self:deltas(a, b)
+    return math.sqrt(dx * dx + dy * dy)
+  end,
+
+  dir_from_deltas = function(self, dx, dy)
+    local dir
+    if dx > 0 then
+      dir = "E"
+    elseif dx < 0 then
+      dir = "W"
+    elseif dy > 0 then
+      dir = "S"
+    elseif dy < 0 then
+      dir = "N"
+    end
+    return dir
+  end,
+
+  move_point_in_dir = function(self, p, dir)
+    local x, y = p.x, p.y
+    if dir == "N" then
+      y = y - 1
+    elseif dir == "E" then
+      x = x + 1
+    elseif dir == "S" then
+      y = y + 1
+    elseif dir == "W" then
+      x = x - 1
+    end
+    return x, y
+  end,
+}
+
+local function is_protein(typ)
+  return #typ == 1 -- A, B, C, D
 end
 
-local function distance_between(a, b)
-  local dx, dy = deltas(a, b)
-  return math.sqrt(dx * dx + dy * dy)
-end
-
-local function dir_from_deltas(dx, dy)
-  local dir
-  if dx > 0 then
-    dir = "E"
-  elseif dx < 0 then
-    dir = "W"
-  elseif dy > 0 then
-    dir = "S"
-  elseif dy < 0 then
-    dir = "N"
-  end
-  return dir
-end
-
-local function move_point_in_dir(p, dir)
-  local x, y = p.x, p.y
-  if dir == "N" then
-    y = y - 1
-  elseif dir == "E" then
-    x = x + 1
-  elseif dir == "S" then
-    y = y + 1
-  elseif dir == "W" then
-    x = x - 1
-  end
-  return x, y
-end
-
-local function proteins(entities)
+local function proteins(all_things)
   local ps = {}
-  for _, v in ipairs(entities) do
-    if #v.typ == 1 then -- A, B, C, D
+  for _, v in ipairs(all_things) do
+    if is_protein(v.typ) then
       table.insert(ps, v)
     end
   end
   return ps
+end
+
+local function enemies(all_things)
+  local es = {}
+  for _, v in ipairs(all_things) do
+    if v.owner == OWNER_ENEMY then
+      table.insert(es, v)
+    end
+  end
+  return es
 end
 
 local function can_grow_basic(my_protein_stack)
@@ -90,7 +106,7 @@ local function closest_thing(organ, things)
   local distance
   local thing
   for _, t in ipairs(ts) do
-    local d = distance_between(t, organ)
+    local d = grid:distance_between(t, organ)
     if not distance or d < distance then
       distance = d
       thing = t
@@ -99,22 +115,22 @@ local function closest_thing(organ, things)
   return distance, thing
 end
 
-local function closest_protein(organ, other_entities)
-  return closest_thing(organ, proteins(other_entities))
+local function closest_protein(organ, all_things)
+  return closest_thing(organ, proteins(all_things))
 end
 
-local function closest_enemy(organ, enemies)
-  return closest_thing(organ, enemies)
+local function closest_enemy(organ, all_things)
+  return closest_thing(organ, enemies(all_things))
 end
 
-local function get_harvester_direction(other_entities, next_head_x, next_head_y)
-  for _, v in ipairs(other_entities) do
-    if #v.typ == 1 then
-      local dx, dy = deltas(v, { x = next_head_x, y = next_head_y })
+local function get_harvester_direction(all_things, next_head_x, next_head_y)
+  for _, v in ipairs(all_things) do
+    if is_protein(v.typ) then
+      local dx, dy = grid:deltas(v, { x = next_head_x, y = next_head_y })
       if math.abs(dx) == 1 and math.abs(dy) == 0 or math.abs(dx) == 0 and math.abs(dy) == 1 then
         debug("head at " .. next_head_x .. "," .. next_head_y)
         debug("found protein at " .. next_head_x + dx .. "," .. next_head_y + dy)
-        dir = dir_from_deltas(dx, dy)
+        local dir = grid:dir_from_deltas(dx, dy)
         if dir then
           return dir
         end
@@ -125,13 +141,10 @@ end
 
 local function parse()
   local entityCount = tonumber(io.read())
-  local my_organs = {}
-  local enemy_organs = {}
-  local other_entities = {}
   local all_things = {}
 
   for _ = 1, entityCount do
-    local next_token = string.gmatch(io.read(), "%S+")
+    next_token = string.gmatch(io.read(), "%S+")
     local x = tonumber(next_token())
     local y = tonumber(next_token())
     local typ = next_token() -- WALL, ROOT, BASIC, TENTACLE, HARVESTER, SPORER, A, B, C, D
@@ -140,15 +153,8 @@ local function parse()
     local organDir = next_token() -- N,E,S,W or X if not an organ
     local organParentId = tonumber(next_token())
     local organRootId = tonumber(next_token())
-    local t = other_entities
 
-    if owner == OWNER_ME then
-      t = my_organs
-    elseif owner == OWNER_ENEMY then
-      t = enemy_organs
-    end
-
-    table.insert(t, {
+    table.insert(all_things, {
       id = organId,
       x = x,
       y = y,
@@ -158,8 +164,7 @@ local function parse()
       organ_parent_id = organParentId,
       organ_root_id = organRootId,
     })
-    local u = t[#t]
-    table.insert(all_things, u)
+    local u = all_things[#all_things]
 
     if #heads == 0 and typ == ROOT then
       heads = { u }
@@ -173,11 +178,11 @@ local function parse()
   head = heads[#heads]
   debug("there are " .. #heads .. " head(s)")
   debug("set head to id " .. head.id)
-  return all_things, my_organs, enemy_organs, other_entities
+  return all_things
 end
 
 local function protein_stacks()
-  local next_token = string.gmatch(io.read(), "%S+")
+  next_token = string.gmatch(io.read(), "%S+")
   local myA = tonumber(next_token())
   local myB = tonumber(next_token())
   local myC = tonumber(next_token())
@@ -192,7 +197,7 @@ end
 
 local function is_being_harvested(protein)
   for _, h in ipairs(harvesters) do
-    local x, y = move_point_in_dir(h, h.dir)
+    local x, y = grid:move_point_in_dir(h, h.dir)
     if protein.x == x and protein.y == y then
       return true
     end
@@ -208,23 +213,14 @@ local function get_thing_at(all_things, x, y)
   end
 end
 
-local function empty_cells_adjacent_to(all_things, x, y)
+local function empty_cells_adjacent_to(all_things, x1, y1)
   local cells = {}
-  local t = get_thing_at(all_things, x - 1, y)
-  if not t then
-    table.insert(cells, { x = x - 1, y = y })
-  end
-  t = get_thing_at(all_things, x + 1, y)
-  if not t then
-    table.insert(cells, { x = x + 1, y = y })
-  end
-  t = get_thing_at(all_things, x, y - 1)
-  if not t then
-    table.insert(cells, { x = x, y = y - 1 })
-  end
-  t = get_thing_at(all_things, x, y + 1)
-  if not t then
-    table.insert(cells, { x = x, y = y + 1 })
+  for _, dir in ipairs(DIRS) do
+    local x2, y2 = grid:move_point_in_dir({ x = x1, y = y1 }, dir)
+    local t = get_thing_at(all_things, x2, y2)
+    if not t then
+      table.insert(cells, { x = x2, y = y2 })
+    end
   end
   return cells
 end
@@ -247,7 +243,7 @@ end
 
 local function spread_adjacent(thing, all_things)
   for _, dir in ipairs(DIRS) do
-    local x, y = move_point_in_dir(thing, dir)
+    local x, y = grid:move_point_in_dir(thing, dir)
     if not get_thing_at(all_things, x, y) then
       debug("spread_adjacent(): there's nothing at " .. x .. "," .. y .. " so growing from there")
       grow_from_head(x, y, BASIC)
@@ -257,11 +253,13 @@ local function spread_adjacent(thing, all_things)
   return false
 end
 
-local function spread_anywhere(all_things, my_organs)
-  for _, o in ipairs(my_organs) do
-    local b = spread_adjacent(o, all_things)
-    if b then
-      return true
+local function spread_anywhere(all_things)
+  for _, o in ipairs(all_things) do
+    if o.owner == OWNER_ME then
+      local b = spread_adjacent(o, all_things)
+      if b then
+        return true
+      end
     end
   end
   return false
@@ -281,21 +279,21 @@ local function get_next_head_pos(thing, all_things)
     return
   end
   table.sort(empty_cells, function(c1, c2)
-    local d1 = distance_between(c1, thing)
-    local d2 = distance_between(c2, thing)
+    local d1 = grid:distance_between(c1, thing)
+    local d2 = grid:distance_between(c2, thing)
     return d1 < d2
   end)
   return empty_cells[1].x, empty_cells[1].y
 end
 
-local function grow_towards_closest_protein(other_entities, my_protein_stack, all_things)
-  local d, p = closest_protein(head, other_entities)
+local function grow_towards_closest_protein(my_protein_stack, all_things)
+  local d, p = closest_protein(head, all_things)
   if d and p and not is_being_harvested(p) then
     debug("distance to closest protein from head is " .. d)
     debug("closest protein is at " .. p.x .. "," .. p.y)
     local next_head_x, next_head_y = get_next_head_pos(p, all_things)
     if next_head_x ~= head.x or next_head_y ~= head.y then
-      local harvester_d = get_harvester_direction(other_entities, next_head_x, next_head_y)
+      local harvester_d = get_harvester_direction(all_things, next_head_x, next_head_y)
       if harvester_d and can_grow_harvester(my_protein_stack) then
         grow_from_head(next_head_x, next_head_y, HARVESTER, harvester_d)
         table.insert(harvesters, { x = next_head_x, y = next_head_y, dir = harvester_d })
@@ -309,8 +307,8 @@ local function grow_towards_closest_protein(other_entities, my_protein_stack, al
   return false
 end
 
-local function grow_towards_closest_enemy(enemies, my_protein_stack, all_things)
-  local d, e = closest_enemy(head, enemies)
+local function grow_towards_closest_enemy(my_protein_stack, all_things)
+  local d, e = closest_enemy(head, all_things)
   if d and e then
     debug("distance to closest enemy from head is " .. d)
     debug("closest enemy is at " .. e.x .. "," .. e.y)
@@ -327,26 +325,26 @@ end
 
 while true do
   local instr_sent = false
-  local all_things, my_organs, enemy_organs, other_entities = parse()
+  local all_things = parse()
   local my_protein_stack, enemy_protein_stack = protein_stacks()
   local requiredActionsCount = tonumber(io.read())
 
   -- grow towards closest protein, maybe planting a harvester
   if not instr_sent and (can_grow_basic(my_protein_stack) or can_grow_harvester(my_protein_stack)) then
     debug("calling grow_towards_closest_protein")
-    instr_sent = grow_towards_closest_protein(other_entities, my_protein_stack, all_things)
+    instr_sent = grow_towards_closest_protein(my_protein_stack, all_things)
   end
 
   -- grow towards closest enemy, maybe planting a tentacle
   if not instr_sent and (can_grow_basic(my_protein_stack) or can_grow_tentacle(my_protein_stack)) then
     debug("calling grow_towards_closest_enemy")
-    instr_sent = grow_towards_closest_enemy(enemy_organs, my_protein_stack, all_things)
+    instr_sent = grow_towards_closest_enemy(my_protein_stack, all_things)
   end
 
   -- spread anywhere
   if not instr_sent and can_grow_basic(my_protein_stack) then
     debug("calling spread anywhere")
-    instr_sent = spread_anywhere(all_things, my_organs)
+    instr_sent = spread_anywhere(all_things)
   end
 
   if not instr_sent then
