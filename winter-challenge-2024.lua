@@ -329,7 +329,6 @@ local function empty_growable_cells(all_things, root_id)
   local empty_cells = {}
   for _, t in ipairs(all_things) do
     if t.owner == OWNER_ME and t.organ_root_id == root_id then
-      debug("organ id " .. t.id .. " has root id " .. t.organ_root_id)
       for _, v in ipairs(empty_cells_adjacent_to(all_things, t)) do
         table.insert(empty_cells, v)
       end
@@ -357,7 +356,7 @@ end
 local function grow_towards_closest_enemy(my_protein_stack, all_things, root_id)
   local distance, pair = closest_enemy(empty_growable_cells(all_things, root_id), all_things)
   if distance and pair then
-    debug("closest enemy is at " .. pair.to.x .. "," .. pair.to.y)
+    debug("closest enemy from id " .. pair.from.thing.id .. ", type " .. pair.from.thing.typ .. " is at " .. pair.to.x .. "," .. pair.to.y)
     if can_grow_basic(my_protein_stack) then
       grow_from(pair.from.thing.id, pair.to.x, pair.to.y, BASIC)
       return true
