@@ -36,6 +36,10 @@ local grid = {
     return math.sqrt(dx * dx + dy * dy)
   end,
 
+  point_to_str = function(self, p)
+    return p.x .. "," .. p.y
+  end,
+
   dir_from_deltas = function(self, dx, dy)
     local dir
     if dx > 0 then
@@ -61,9 +65,20 @@ local grid = {
     elseif dir == "W" then
       x = x - 1
     end
-    return x, y
+    if x > 0 and y > 0 and x <= W and y <= H then
+      return { x = x, y = y }
+    end
   end,
 }
+
+local function copy_table_and_append(t, a)
+  local u = {}
+  for _, v in ipairs(t) do
+    table.insert(u, v)
+  end
+  table.insert(u, a)
+  return u
+end
 
 local function is_protein(typ)
   return #typ == 1 -- A, B, C, D
@@ -228,8 +243,8 @@ end
 local function is_being_harvested(all_things, protein)
   for _, t in ipairs(all_things) do
     if t.typ == HARVESTER and t.owner == OWNER_ME then
-      local x, y = grid:move_point_in_dir(t, t.organ_dir)
-      if protein.x == x and protein.y == y then
+      local p = grid:move_point_in_dir(t, t.organ_dir)
+      if p and protein.x == p.x and protein.y == p.y then
         return true
       end
     end
@@ -248,10 +263,12 @@ end
 local function empty_cells_adjacent_to(all_things, thing)
   local cells = {}
   for _, dir in ipairs(DIRS) do
-    local x2, y2 = grid:move_point_in_dir({ x = thing.x, y = thing.y }, dir)
-    local t = get_thing_at(all_things, x2, y2)
-    if not t then
-      table.insert(cells, { thing = thing, x = x2, y = y2 })
+    local p = grid:move_point_in_dir({ x = thing.x, y = thing.y }, dir)
+    if p then
+      local t = get_thing_at(all_things, p.x, p.y)
+      if not t then
+        table.insert(cells, { thing = thing, x = p.x, y = p.y })
+      end
     end
   end
   return cells
@@ -273,10 +290,12 @@ end
 
 local function spread_adjacent(thing, all_things)
   for _, dir in ipairs(DIRS) do
-    local x, y = grid:move_point_in_dir(thing, dir)
-    if not get_thing_at(all_things, x, y) then
-      grow_from(thing.id, x, y, BASIC)
-      return true
+    local p = grid:move_point_in_dir(thing, dir)
+    if p then
+      if not get_thing_at(all_things, p.x, p.y) then
+        grow_from(thing.id, p.x, p.y, BASIC)
+        return true
+      end
     end
   end
   return false
@@ -286,11 +305,14 @@ local function count_unobstructed(all_things, cell, dir)
   local c = 0
   local p = { x = cell.x, y = cell.y }
   repeat
-    local x, y = grid:move_point_in_dir(p, dir)
-    local obstruction = get_thing_at(all_things, x, y)
-    if not obstruction then
-      p.x, p.y = x, y
-      c = c + 1
+    local obstruction = true
+    local p2 = grid:move_point_in_dir(p, dir)
+    if p2 then
+      obstruction = get_thing_at(all_things, p2.x, p2.y)
+      if not obstruction then
+        p = p2
+        c = c + 1
+      end
     end
   until obstruction
   return c
@@ -303,10 +325,13 @@ local function furthest_unobstructed(all_things, t)
   local dir = t.organ_dir
   local p = { x = t.x, y = t.y }
   repeat
-    local x, y = grid:move_point_in_dir(p, dir)
-    local obstruction = get_thing_at(all_things, x, y)
-    if not obstruction then
-      p.x, p.y = x, y
+    local obstruction = true
+    local p2 = grid:move_point_in_dir(p, dir)
+    if p2 then
+      obstruction = get_thing_at(all_things, p2.x, p2.y)
+      if not obstruction then
+        p = p2
+      end
     end
   until obstruction
   if p.x ~= t.x or p.y ~= t.y then
@@ -325,6 +350,33 @@ local function spread_anywhere(all_things, root_id)
   return false
 end
 
+local function find_path(all_things, p1, p2)
+  local stack = { { p1 } }
+  local visited = {}
+  while #stack > 0 do
+    local next = {}
+    for _, path in ipairs(stack) do
+      local p = path[#path]
+      visited[grid:point_to_str(p)] = true
+      for _, dir in ipairs(DIRS) do
+        local moved_p = grid:move_point_in_dir(p, dir)
+        if moved_p then
+          local next_p = moved_p
+          if next_p.x == p2.x and next_p.y == p2.y then
+            debug("path from " .. p1.x .. "," .. p1.y .. " to " .. p2.x .. "," .. p2.y .. " found of length " .. #path)
+            return copy_table_and_append(path, next_p)
+          end
+          if not get_thing_at(all_things, next_p.x, next_p.y) and not visited[grid:point_to_str(next_p)] then
+            table.insert(next, copy_table_and_append(path, next_p))
+          end
+        end
+      end
+    end
+    stack = next
+  end
+  debug("path from " .. p1.x .. "," .. p1.y .. " not found")
+end
+
 local function empty_growable_cells(all_things, root_id)
   local empty_cells = {}
   for _, t in ipairs(all_things) do
@@ -340,14 +392,32 @@ end
 local function grow_towards_closest_protein(my_protein_stack, all_things, root_id)
   local distance, pair = closest_protein(empty_growable_cells(all_things, root_id), all_things)
   if distance and pair and not is_being_harvested(all_things, pair.to) then
-    debug("closest protein from id " .. pair.from.thing.id .. ", type " .. pair.from.thing.typ .. " is at " .. pair.to.x .. "," .. pair.to.y)
-    local dir = get_harvester_direction(all_things, pair.from.thing.x, pair.from.thing.y)
-    if dir and can_grow_harvester(my_protein_stack) then
-      grow_from(pair.from.thing.id, pair.to.x, pair.to.y, HARVESTER, dir)
-      return true
-    elseif can_grow_basic(my_protein_stack) then
-      grow_from(pair.from.thing.id, pair.to.x, pair.to.y, BASIC)
-      return true
+    debug(
+      "closest protein from id "
+        .. pair.from.thing.id
+        .. ", type "
+        .. pair.from.thing.typ
+        .. " is at "
+        .. pair.to.x
+        .. ","
+        .. pair.to.y
+    )
+    local path = find_path(
+      all_things,
+      { x = pair.from.thing.x, y = pair.from.thing.y },
+      { x = pair.to.x, y = pair.to.y }
+    )
+    if path then
+      local dir = get_harvester_direction(all_things, pair.from.thing.x, pair.from.thing.y)
+      if dir and can_grow_harvester(my_protein_stack) then
+        --grow_from(pair.from.thing.id, pair.to.x, pair.to.y, HARVESTER, dir)
+        grow_from(pair.from.thing.id, path[2].x, path[2].y, HARVESTER, dir)
+        return true
+      elseif can_grow_basic(my_protein_stack) then
+        --grow_from(pair.from.thing.id, pair.to.x, pair.to.y, BASIC)
+        grow_from(pair.from.thing.id, path[2].x, path[2].y, BASIC)
+        return true
+      end
     end
   end
   return false
@@ -356,10 +426,27 @@ end
 local function grow_towards_closest_enemy(my_protein_stack, all_things, root_id)
   local distance, pair = closest_enemy(empty_growable_cells(all_things, root_id), all_things)
   if distance and pair then
-    debug("closest enemy from id " .. pair.from.thing.id .. ", type " .. pair.from.thing.typ .. " is at " .. pair.to.x .. "," .. pair.to.y)
-    if can_grow_basic(my_protein_stack) then
-      grow_from(pair.from.thing.id, pair.to.x, pair.to.y, BASIC)
-      return true
+    debug(
+      "closest enemy from id "
+        .. pair.from.thing.id
+        .. ", type "
+        .. pair.from.thing.typ
+        .. " is at "
+        .. pair.to.x
+        .. ","
+        .. pair.to.y
+    )
+    local path = find_path(
+      all_things,
+      { x = pair.from.thing.x, y = pair.from.thing.y },
+      { x = pair.to.x, y = pair.to.y }
+    )
+    if path then
+      if can_grow_basic(my_protein_stack) then
+        --grow_from(pair.from.thing.id, pair.to.x, pair.to.y, BASIC)
+        grow_from(pair.from.thing.id, path[2].x, path[2].y, BASIC)
+        return true
+      end
     end
   end
   return false
