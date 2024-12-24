@@ -7,6 +7,7 @@ local OWNER_ENEMY = 0
 local OWNER_NA = -1
 local DIRS = { "N", "E", "S", "W" }
 local MIN_SPORER_UNOBSTRUCTED = W > H and W // 2 or H // 2
+local MAX_ROOTS = 1
 
 local WALL = "WALL"
 local ROOT = "ROOT"
@@ -65,7 +66,7 @@ local grid = {
     elseif dir == "W" then
       x = x - 1
     end
-    if x > 0 and y > 0 and x <= W and y <= H then
+    if x >= 0 and y >= 0 and x < W and y < H then
       return { x = x, y = y }
     end
   end,
@@ -109,10 +110,22 @@ local function organs(all_things, root_id, owner)
   return ts
 end
 
-local function proteins(all_things)
+local function is_being_harvested(all_things, protein)
+  for _, t in ipairs(all_things) do
+    if t.typ == HARVESTER and t.owner == OWNER_ME then
+      local p = grid:move_point_in_dir(t, t.organ_dir)
+      if p and protein.x == p.x and protein.y == p.y then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+local function unharvested_proteins(all_things)
   local ts = {}
   for _, v in ipairs(all_things) do
-    if is_protein(v.typ) then
+    if is_protein(v.typ) and not is_being_harvested(all_things, v) then
       table.insert(ts, v)
     end
   end
@@ -177,25 +190,21 @@ local function closest_pair(xs, ys)
   return distance, closest
 end
 
-local function closest_protein(cells, all_things)
-  return closest_pair(cells, proteins(all_things))
+local function closest_unharvested_protein(cells, all_things)
+  return closest_pair(cells, unharvested_proteins(all_things))
 end
 
 local function closest_enemy(cells, all_things)
   return closest_pair(cells, enemies(all_things))
 end
 
-local function get_harvester_direction(all_things, next_x, next_y)
-  for _, v in ipairs(all_things) do
-    if is_protein(v.typ) then
-      local dx, dy = grid:deltas(v, { x = next_x, y = next_y })
-      if grid:two_away(dx, dy) then
-        local dir = grid:dir_from_deltas(dx, dy)
-        if dir then
-          return dir
-        end
-      end
-    end
+local function get_joining_direction(path)
+  assert(#path == 3)
+  local dx, dy = grid:deltas(path[3], path[2])
+  local dir = grid:dir_from_deltas(dx, dy)
+  if dir then
+    debug("direction joining " .. path[2].x .. "," .. path[2].y .. " to " .. path[3].x .. "," .. path[3].y .. " is " .. dir)
+    return dir
   end
 end
 
@@ -238,18 +247,6 @@ local function protein_stacks()
   local enC = tonumber(next_token())
   local enD = tonumber(next_token())
   return { A = myA, B = myB, C = myC, D = myD }, { A = enA, B = enB, C = enC, D = enD }
-end
-
-local function is_being_harvested(all_things, protein)
-  for _, t in ipairs(all_things) do
-    if t.typ == HARVESTER and t.owner == OWNER_ME then
-      local p = grid:move_point_in_dir(t, t.organ_dir)
-      if p and protein.x == p.x and protein.y == p.y then
-        return true
-      end
-    end
-  end
-  return false
 end
 
 local function get_thing_at(all_things, x, y)
@@ -390,8 +387,8 @@ local function empty_growable_cells(all_things, root_id)
 end
 
 local function grow_towards_closest_protein(my_protein_stack, all_things, root_id)
-  local distance, pair = closest_protein(empty_growable_cells(all_things, root_id), all_things)
-  if distance and pair and not is_being_harvested(all_things, pair.to) then
+  local distance, pair = closest_unharvested_protein(empty_growable_cells(all_things, root_id), all_things)
+  if distance and pair then
     debug(
       "closest protein from id "
         .. pair.from.thing.id
@@ -408,13 +405,11 @@ local function grow_towards_closest_protein(my_protein_stack, all_things, root_i
       { x = pair.to.x, y = pair.to.y }
     )
     if path then
-      local dir = get_harvester_direction(all_things, pair.from.thing.x, pair.from.thing.y)
-      if dir and can_grow_harvester(my_protein_stack) then
-        --grow_from(pair.from.thing.id, pair.to.x, pair.to.y, HARVESTER, dir)
+      if #path == 3 and can_grow_harvester(my_protein_stack) then
+        local dir = get_joining_direction(path)
         grow_from(pair.from.thing.id, path[2].x, path[2].y, HARVESTER, dir)
         return true
       elseif can_grow_basic(my_protein_stack) then
-        --grow_from(pair.from.thing.id, pair.to.x, pair.to.y, BASIC)
         grow_from(pair.from.thing.id, path[2].x, path[2].y, BASIC)
         return true
       end
@@ -425,7 +420,7 @@ end
 
 local function grow_towards_closest_enemy(my_protein_stack, all_things, root_id)
   local distance, pair = closest_enemy(empty_growable_cells(all_things, root_id), all_things)
-  if distance and pair then
+  if distance and distance > 1 and pair then
     debug(
       "closest enemy from id "
         .. pair.from.thing.id
@@ -443,7 +438,6 @@ local function grow_towards_closest_enemy(my_protein_stack, all_things, root_id)
     )
     if path then
       if can_grow_basic(my_protein_stack) then
-        --grow_from(pair.from.thing.id, pair.to.x, pair.to.y, BASIC)
         grow_from(pair.from.thing.id, path[2].x, path[2].y, BASIC)
         return true
       end
@@ -513,13 +507,13 @@ while true do
     local instr_sent = false
 
     -- create a sporer
-    if not instr_sent and can_grow_sporer(my_protein_stack) then
+    if not instr_sent and #root_ids < MAX_ROOTS and can_grow_sporer(my_protein_stack) then
       debug("calling grow_sporer")
       instr_sent = grow_sporer(all_things, root_id)
     end
 
     -- fire a spore
-    if not instr_sent and can_grow_root(my_protein_stack) then
+    if not instr_sent and #root_ids < MAX_ROOTS and can_grow_root(my_protein_stack) then
       debug("calling fire_spore")
       instr_sent = fire_spore(all_things, root_id)
     end
